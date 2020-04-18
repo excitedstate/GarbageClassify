@@ -283,6 +283,104 @@ class Merge:
             np.save(set_label + '_labels_%d.npy' % i, np.array(temp_label))
             print(len(temp_label), temp_image.shape)
 
+# # # 图像分割算法
+class PicSplit:
+    def __init__(self):
+        self.img = cv2.imread(TMP_ROOT + "/test.jpg")
+        # cv_show(self.img, "origin-img")
+
+    def watershed(self, _img=None):
+        # # 灰度和二值转换
+        _img = self.img if _img is None else _img
+        _gray = cv2.cvtColor(_img, cv2.COLOR_BGR2GRAY)
+        _, _binary = cv2.threshold(_gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+        # # 形态学操作
+        # # # 形态学操作卷积核
+        _kernel = np.ones((3, 3), np.uint8)
+        # # # 开运算去噪(去掉椒盐噪声的影响)
+        _opening = cv2.morphologyEx(_binary, cv2.MORPH_OPEN, _kernel, iterations=2)
+        # # # 如果能画出背景和前景, 分割算法会很好
+        # # # 考虑到数据量的原因, 使用程序 机械的找出
+        # # # 找出一定是背景的部分 膨胀操作: 扩大图形区的面积
+        _sure_bg = cv2.dilate(_opening, _kernel, iterations=3)
+        # cv_show(_sure_bg)
+        # # 距离变换函数: 对原始图像进行计算 之后二值处理, 获取前景
+        # # 该函数的第一个参数只能是单通道的二值的图像, 第二个参数是距离方法
+        # # 计算图像上255点与最近的0点之间的距离 DIST_L2应是欧氏距离, 会输出小数
+        # # DIST_L1应是哈密顿距离, 不会有小数
+        _dist_transform = cv2.distanceTransform(_opening, cv2.DIST_L1, 5)
+        # cv_show(_dist_transform)
+        # # 距离变换之后做一二值变换, 得到大概率是图像前景的点
+        _, _sure_fg = cv2.threshold(_dist_transform, 0.5 * _dist_transform.max(), 255, cv2.THRESH_BINARY)
+        # # 转换类型, 否则会很危险
+        _sure_fg = np.uint8(_sure_fg)
+        # cv_show(_sure_fg)
+        # # 绘制unknown区 交给算法, 自下而上的洪泛算法
+        _unknown = cv2.subtract(_sure_bg, _sure_fg)
+        # cv_show(_unknown)
+        _, _markers = cv2.connectedComponents(_sure_fg)
+        _markers = _markers + 1
+        _markers[_unknown == 255] = 0
+        _img1 = _img.copy()
+        _markers = cv2.watershed(_img1, _markers)
+
+        # # 圈出来 之后可以根据结果将一部分的值变为黑色
+        def random_color(a: int):
+            return np.random.randint(0, 255, (a, 3))
+
+        _markers_label = np.unique(_markers)
+        _colors = random_color(_markers_label.size)
+        for _mark, _color in zip(_markers_label, _colors):
+            _img1[_markers == _mark] = _color
+        # # 展示
+        cv_show(_img1)
+
+    def to_counters(self, _img=None):
+        # # 检测轮廓 边缘分割
+        _img = _img if _img is not None else self.img
+        # # 灰度和二值
+        _gray = cv2.cvtColor(_img, cv2.COLOR_BGR2GRAY)
+        _, _binary = cv2.threshold(_gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+        # cv_show(_binary, "binary test")
+        # # Canny边缘检测
+        # edges = cv2.Canny(_img, 50, 150, )
+        # cv_show(edges)
+        # # 轮廓检测, 画出轮廓
+        _contours, _ = cv2.findContours(_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        _draw_img = _img.copy()
+        # # 计算轮廓的大小, 选定阈值 对轮廓进行选择
+        _greatest_contour_idx = np.argmax([cv2.contourArea(_contour) for _contour in _contours])
+        # # 求轮廓的外接矩形
+        _greatest_contour = _contours[_greatest_contour_idx]
+        _x, _y, _w, _h = cv2.boundingRect(_greatest_contour)
+        _ret = cv2.rectangle(_img, (_x, _y), (_x + _w, _y + _h), color=(0, 255, 255), thickness=1)
+        # # 上下
+        _ret[0: _y, :] = (0, 0, 0)
+        _ret[_y + _h: -1, :] = (0, 0, 0)
+        # # 左右
+        _ret[:, 0: _x] = (0, 0, 0)
+        _ret[:, _x + _w: -1] = (0, 0, 0)
+        # _ret = cv2.drawContours(_draw_img, _contours, _greatest_contour_idx, (255, 0, 255), 2)
+        cv_show(_ret)
+
+    """
+    其他图像分割方法 还有机器学习方法 时间关系 不学了
+     1. 深度学习图像分割  labelme & FCN --> 将这个分割方法作为重点学习
+     2. 基于区域的分割
+        (1) 区域生长算法
+            a. 选择合适的生长点(seed)
+            b. 确定相似性准则即生长规则(生长点像素和当前像素之差小于阈值T, 自定义的或者是其他算法给出的, 如遗传算法)
+            c. 确定生长停止条件
+            d. 从seed点附近开始按照相似性准则拓展, 直到不能拓展(图像边界 或不适合遇到一圈不合适的点)
+            e. 遍历整张图像, 执行a~e, 直到图像中没有可以未被检查的点
+        (2) 区域分离和聚合算法
+            a. 分割子区域(sub_zone)(4个子区域, 不断分割, 直到不能再分, 要基于自己设定的条件)
+            b. 确定合并规则(若B区中有80%的点满足以下关系: A区均值与B区某点的像素值差的绝对值<=2(A区方差))
+            c. 自叶子结点开始向上遍历子区域, 确定能否合并
+                c1. 能合并, 合并之后作为新的叶子结点
+                c2. 不能合并, continue
+            d. 根节点与叶子结点直接相连, 递归过程结束
+    """
 
 if __name__ == "__main__":
     ret_images = []
